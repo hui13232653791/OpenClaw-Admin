@@ -2,9 +2,9 @@
 set -e
 
 : "${OPENCLAW_WS_URL:=ws://localhost:18789}"
-: "${OPENCLAW_AUTH_TOKEN:=}"
-: "${AUTH_USERNAME:=}"
-: "${AUTH_PASSWORD:=}"
+: "${OPENCLAW_AUTH_TOKEN:=*****}"
+: "${AUTH_USERNAME:=admin}"
+: "${AUTH_PASSWORD:=admin}"
 
 cat > /app/.env <<EOF
 OPENCLAW_WS_URL=$OPENCLAW_WS_URL
