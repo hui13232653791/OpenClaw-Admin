@@ -3,8 +3,8 @@ FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
- python3 make g++ \
- && rm -rf /var/lib/apt/lists/*
+  python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
 RUN npm ci
@@ -23,9 +23,5 @@ COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server ./server
 
-COPY --from=builder /app/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
-RUN ls -l /app
-
 EXPOSE 3001
-CMD ["sh", "/app/entrypoint.sh"]
+CMD ["node", "--env-file=.env", "server/index.js"]
