@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+: "${OPENCLAW_WS_URL:=ws://localhost:18789}"
+: "${OPENCLAW_AUTH_TOKEN:=}"
+: "${AUTH_USERNAME:=}"
+: "${AUTH_PASSWORD:=}"
+
+cat > /app/.env <<EOF
+OPENCLAW_WS_URL=$OPENCLAW_WS_URL
+OPENCLAW_AUTH_TOKEN=$OPENCLAW_AUTH_TOKEN
+AUTH_USERNAME=$AUTH_USERNAME
+AUTH_PASSWORD=$AUTH_PASSWORD
+EOF
+
+exec node server/index.js
