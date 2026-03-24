@@ -150,6 +150,8 @@ const channelOptionsForCreate = computed(() => {
     { label: 'Telegram', value: 'telegram' },
     { label: 'Discord', value: 'discord' },
     { label: 'Slack', value: 'slack' },
+    { label: 'Wecom', value: 'wecom' },
+    { label: 'OpenclawWeixin', value: 'openclaw-weixin' },
   ]
   return channels
 })
