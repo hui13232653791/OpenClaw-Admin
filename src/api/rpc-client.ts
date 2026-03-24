@@ -927,8 +927,9 @@ export class RPCClient {
     if (Array.isArray(rawContent)) {
       rawContentArray = rawContent.map((item) => {
         const itemRow = this.asRecord(item) || {}
-        return {
-          type: this.asString(itemRow.type) as ChatMessageContent['type'] || 'text',
+        const itemType = this.asString(itemRow.type) as ChatMessageContent['type'] || 'text'
+        const baseContent = {
+          type: itemType,
           text: this.asString(itemRow.text),
           thinking: this.asString(itemRow.thinking),
           id: this.asString(itemRow.id),
@@ -937,6 +938,16 @@ export class RPCClient {
           content: itemRow.content,
           isError: itemRow.isError === true,
         }
+        if (itemType === 'image') {
+          return {
+            ...baseContent,
+            mimeType: this.asString(itemRow.mimeType || itemRow.mime_type),
+            bytes: typeof itemRow.bytes === 'number' ? itemRow.bytes : undefined,
+            data: this.asString(itemRow.data),
+            mediaPath: this.asString(itemRow.mediaPath || itemRow.media_path),
+          }
+        }
+        return baseContent
       })
       contentText = rawContent
         .map((item) => {
@@ -958,6 +969,9 @@ export class RPCClient {
             } catch {
               return ''
             }
+          }
+          if (itemRow.type === 'image') {
+            return '[图片]'
           }
           return ''
         })

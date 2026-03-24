@@ -918,12 +918,21 @@ interface ToolValidationErrorItemView {
   argumentsText?: string
 }
 
+interface ImageItemView {
+  mimeType?: string
+  bytes?: number
+  data?: string
+  mediaPath?: string
+  url?: string
+}
+
 interface StructuredMessageView {
   toolCalls: ToolCallItemView[]
   thinkings: ThinkingItemView[]
   toolResults: ToolResultItemView[]
   validationErrors: ToolValidationErrorItemView[]
   plainTexts: string[]
+  images: ImageItemView[]
 }
 
 interface RenderMessage {
@@ -981,6 +990,19 @@ async function copyToClipboard(text: string) {
   } catch {
     message.error(t('common.copyFailed'))
   }
+}
+
+const imagePreviewUrl = ref<string | null>(null)
+const showImagePreviewModal = ref(false)
+
+function openImagePreview(url: string) {
+  imagePreviewUrl.value = url
+  showImagePreviewModal.value = true
+}
+
+function closeImagePreview() {
+  showImagePreviewModal.value = false
+  imagePreviewUrl.value = null
 }
 
 function asString(value: unknown): string {
@@ -1058,7 +1080,104 @@ function parseToolResultMessage(item: ChatMessage): StructuredMessageView | null
     toolResults,
     validationErrors: [],
     plainTexts: [],
+    images: [],
   }
+}
+
+function buildImageUrl(part: ChatMessageContent): string | undefined {
+  if (part.data) {
+    const mimeType = part.mimeType || 'image/png'
+    return `data:${mimeType};base64,${part.data}`
+  }
+  if (part.mediaPath) {
+    let mediaPath = part.mediaPath
+    
+    // 处理 MEDIA: 前缀
+    if (mediaPath.startsWith('MEDIA:')) {
+      mediaPath = mediaPath.slice(6)
+    }
+    
+    // 从 file:// URL 中提取相对路径
+    // 例如: file:///C:/Users/xxx/.openclaw/media/browser/xxx.png -> browser/xxx.png
+    if (mediaPath.startsWith('file://')) {
+      // 查找 .openclaw/media/ 后面的相对路径
+      const mediaIndex = mediaPath.indexOf('.openclaw/media/')
+      if (mediaIndex !== -1) {
+        mediaPath = mediaPath.slice(mediaIndex + '.openclaw/media/'.length)
+      } else {
+        // 如果没有找到标准路径，尝试提取文件名
+        const lastSlash = mediaPath.lastIndexOf('/')
+        if (lastSlash !== -1) {
+          mediaPath = `browser/${mediaPath.slice(lastSlash + 1)}`
+        }
+      }
+    }
+    
+    return `/api/media?path=${encodeURIComponent(mediaPath)}`
+  }
+  return undefined
+}
+
+/**
+ * 从路径中提取相对于媒体目录的相对路径
+ */
+function normalizeMediaPath(path: string): string {
+  // 处理 MEDIA: 前缀
+  if (path.startsWith('MEDIA:')) {
+    path = path.slice(6)
+  }
+  
+  // 从 file:// URL 中提取相对路径
+  // 例如: file:///C:/Users/xxx/.openclaw/media/browser/xxx.png -> browser/xxx.png
+  if (path.startsWith('file://')) {
+    const mediaIndex = path.indexOf('.openclaw/media/')
+    if (mediaIndex !== -1) {
+      return path.slice(mediaIndex + '.openclaw/media/'.length)
+    }
+    // 如果没有找到标准路径，尝试提取文件名
+    const lastSlash = path.lastIndexOf('/')
+    if (lastSlash !== -1) {
+      return `browser/${path.slice(lastSlash + 1)}`
+    }
+  }
+  
+  return path
+}
+
+function extractImageFromText(text: string): { images: ImageItemView[]; cleanedText: string } {
+  const images: ImageItemView[] = []
+  let cleanedText = text
+  
+  const mdImageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g
+  let match
+  while ((match = mdImageRegex.exec(text)) !== null) {
+    const imagePath = match[2]
+    if (imagePath && imagePath.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
+      const normalizedPath = normalizeMediaPath(imagePath)
+      const imageUrl = `/api/media?path=${encodeURIComponent(normalizedPath)}`
+      images.push({
+        mimeType: `image/${imagePath.split('.').pop()?.toLowerCase() || 'png'}`,
+        url: imageUrl,
+      })
+      cleanedText = cleanedText.replace(match[0], '').trim()
+    }
+  }
+  
+  const mediaPathRegex = /MEDIA:([^\s\n]+)/g
+  while ((match = mediaPathRegex.exec(text)) !== null) {
+    const imagePath = match[1]
+    if (imagePath && imagePath.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
+      const normalizedPath = normalizeMediaPath(imagePath)
+      const imageUrl = `/api/media?path=${encodeURIComponent(normalizedPath)}`
+      images.push({
+        mimeType: `image/${imagePath.split('.').pop()?.toLowerCase() || 'png'}`,
+        url: imageUrl,
+      })
+      cleanedText = cleanedText.replace(match[0], '').trim()
+    }
+  }
+  
+  return { images, cleanedText }
 }
 
 function parseRawContent(rawContent: ChatMessageContent[]): StructuredMessageView | null {
@@ -1066,10 +1185,27 @@ function parseRawContent(rawContent: ChatMessageContent[]): StructuredMessageVie
   const thinkings: ThinkingItemView[] = []
   const toolResults: ToolResultItemView[] = []
   const plainTexts: string[] = []
+  const images: ImageItemView[] = []
 
   for (const part of rawContent) {
     if (part.type === 'text' && part.text) {
-      plainTexts.push(part.text)
+      const { images: extractedImages, cleanedText } = extractImageFromText(part.text)
+      images.push(...extractedImages)
+      
+      const trimmedText = cleanedText.trim()
+      if (trimmedText.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
+        // Add "browser/" prefix for image filenames without a path
+        const imagePath = trimmedText.includes('/') ? trimmedText : `browser/${trimmedText}`
+        const imageUrl = `/api/media?path=${encodeURIComponent(imagePath)}`
+        images.push({
+          mimeType: `image/${trimmedText.split('.').pop()?.toLowerCase() || 'png'}`,
+          url: imageUrl,
+        })
+        // Also add the image filename to plainTexts to display it as text
+        plainTexts.push(cleanedText)
+      } else if (trimmedText) {
+        plainTexts.push(cleanedText)
+      }
     }
     
     if (part.type === 'thinking' && part.thinking) {
@@ -1117,9 +1253,20 @@ function parseRawContent(rawContent: ChatMessageContent[]): StructuredMessageVie
         content: contentText,
       })
     }
+
+    if (part.type === 'image') {
+      const imageUrl = buildImageUrl(part)
+      images.push({
+        mimeType: part.mimeType,
+        bytes: part.bytes,
+        data: part.data,
+        mediaPath: part.mediaPath,
+        url: imageUrl,
+      })
+    }
   }
 
-  if (toolCalls.length === 0 && thinkings.length === 0 && toolResults.length === 0 && plainTexts.length === 0) {
+  if (toolCalls.length === 0 && thinkings.length === 0 && toolResults.length === 0 && plainTexts.length === 0 && images.length === 0) {
     return null
   }
 
@@ -1129,6 +1276,7 @@ function parseRawContent(rawContent: ChatMessageContent[]): StructuredMessageVie
     toolResults,
     validationErrors: [],
     plainTexts,
+    images,
   }
 }
 
@@ -1413,6 +1561,7 @@ function parseStructuredMessage(content: string): StructuredMessageView | null {
       toolResults: [],
       validationErrors: [validationError],
       plainTexts: [],
+      images: [],
     }
   }
   const rawItems = parsed.items
@@ -1516,6 +1665,7 @@ function parseStructuredMessage(content: string): StructuredMessageView | null {
     toolResults,
     validationErrors: [],
     plainTexts: parsed.plainLines,
+    images: [],
   }
 }
 
@@ -2190,6 +2340,23 @@ watch(selectedSessionKey, async (newSessionKey) => {
                     </NTooltip>
                   </div>
                 </div>
+
+                <div v-if="entry.structured.images.length" class="chat-images-container">
+                  <div
+                    v-for="(img, imgIndex) in entry.structured.images"
+                    :key="`${entry.key}-img-${imgIndex}`"
+                    class="chat-image-wrapper"
+                  >
+                    <img
+                      v-if="img.url"
+                      :src="img.url"
+                      class="chat-image"
+                      loading="lazy"
+                      @click="openImagePreview(img.url)"
+                    />
+                    <span v-else class="chat-image-placeholder">{{ t('pages.chat.image.unavailable') }}</span>
+                  </div>
+                </div>
               </div>
 
               <div v-else class="chat-bubble-content-wrapper">
@@ -2595,6 +2762,23 @@ watch(selectedSessionKey, async (newSessionKey) => {
                     </NTooltip>
                   </div>
                 </div>
+
+                <div v-if="entry.structured.images.length" class="chat-images-container">
+                  <div
+                    v-for="(img, imgIndex) in entry.structured.images"
+                    :key="`${entry.key}-img-${imgIndex}`"
+                    class="chat-image-wrapper"
+                  >
+                    <img
+                      v-if="img.url"
+                      :src="img.url"
+                      class="chat-image"
+                      loading="lazy"
+                      @click="openImagePreview(img.url)"
+                    />
+                    <span v-else class="chat-image-placeholder">{{ t('pages.chat.image.unavailable') }}</span>
+                  </div>
+                </div>
               </div>
 
               <div v-else class="chat-bubble-content-wrapper">
@@ -2820,6 +3004,19 @@ watch(selectedSessionKey, async (newSessionKey) => {
         </NButton>
       </NSpace>
     </template>
+  </NModal>
+
+  <NModal
+    v-model:show="showImagePreviewModal"
+    preset="card"
+    :title="t('pages.chat.image.preview')"
+    style="width: 90vw; max-width: 1200px;"
+    :mask-closable="true"
+    @update:show="(val: boolean) => { if (!val) closeImagePreview() }"
+  >
+    <div v-if="imagePreviewUrl" class="image-preview-container">
+      <img :src="imagePreviewUrl" class="image-preview-full" />
+    </div>
   </NModal>
 </template>
 
@@ -3552,5 +3749,55 @@ watch(selectedSessionKey, async (newSessionKey) => {
   border-radius: 6px;
   border: 1px solid var(--border-color);
   background: var(--bg-primary);
+}
+
+.chat-images-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chat-image-wrapper {
+  max-width: 300px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.chat-image {
+  display: block;
+  max-width: 100%;
+  max-height: 300px;
+  object-fit: contain;
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+
+.chat-image:hover {
+  transform: scale(1.02);
+}
+
+.chat-image-placeholder {
+  display: block;
+  padding: 16px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+}
+
+.image-preview-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+}
+
+.image-preview-full {
+  max-width: 100%;
+  max-height: 80vh;
+  object-fit: contain;
+  border-radius: 8px;
 }
 </style>

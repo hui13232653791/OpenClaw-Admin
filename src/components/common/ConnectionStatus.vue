@@ -33,11 +33,7 @@ const status = computed(() => {
 })
 
 const hasUpdate = computed(() => {
-  // 如果有updateAvailable，且currentVersion !== latestVersion，使用它
-  if (wsStore.updateAvailable && wsStore.updateAvailable.currentVersion !== wsStore.updateAvailable.latestVersion) {
-    return true
-  }
-  // 否则，比较当前版本和从npm获取的最新版本
+  // 比较当前版本和从npm获取的最新版本
   if (wsStore.gatewayVersion && latestVersion.value) {
     return wsStore.gatewayVersion !== latestVersion.value
   }
@@ -45,9 +41,6 @@ const hasUpdate = computed(() => {
 })
 
 const displayLatestVersion = computed(() => {
-  if (wsStore.updateAvailable) {
-    return wsStore.updateAvailable.latestVersion
-  }
   return latestVersion.value
 })
 
@@ -67,26 +60,27 @@ async function fetchNpmVersions() {
     if (versions.length > 0) {
       latestVersion.value = versions[0]
       console.log('[ConnectionStatus] Latest version:', latestVersion.value)
-    }
-    
-    versionOptions.value = versions.map((version: string) => ({
-      label: version,
-      value: version
-    }))
-    
-    if (versions.length > 0) {
+      
+      versionOptions.value = versions.map((version: string) => ({
+        label: version,
+        value: version
+      }))
+      
       selectedVersion.value = versions[0]
+    } else {
+      // 如果没有获取到版本列表，使用当前网关版本
+      if (wsStore.gatewayVersion) {
+        versionOptions.value = [
+          { label: wsStore.gatewayVersion, value: wsStore.gatewayVersion }
+        ]
+        selectedVersion.value = wsStore.gatewayVersion
+      }
     }
   } catch (error) {
     console.error('[ConnectionStatus] Failed to fetch npm versions:', error)
     message.warning(t('components.connectionStatus.fetchVersionsFailed'))
-    if (wsStore.updateAvailable) {
-      versionOptions.value = [
-        { label: wsStore.updateAvailable.latestVersion, value: wsStore.updateAvailable.latestVersion },
-        { label: wsStore.updateAvailable.currentVersion, value: wsStore.updateAvailable.currentVersion }
-      ]
-      selectedVersion.value = wsStore.updateAvailable.latestVersion
-    } else if (wsStore.gatewayVersion) {
+    // 即使获取失败，也不使用 Gateway 提供的版本信息，保持 latestVersion 为 null
+    if (wsStore.gatewayVersion) {
       versionOptions.value = [
         { label: wsStore.gatewayVersion, value: wsStore.gatewayVersion }
       ]

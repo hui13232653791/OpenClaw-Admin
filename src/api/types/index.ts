@@ -4,6 +4,7 @@ export * from './channel'
 export * from './config'
 export * from './terminal'
 export * from './remote-desktop'
+export * from './backup'
 import type { ModelConfig, ToolPolicyConfig } from './config'
 
 export interface Skill {
@@ -125,7 +126,7 @@ export interface SendParams {
 }
 
 export interface ChatMessageContent {
-  type: 'text' | 'thinking' | 'tool_call' | 'tool_result'
+  type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'image'
   text?: string
   thinking?: string
   id?: string
@@ -133,6 +134,10 @@ export interface ChatMessageContent {
   arguments?: Record<string, unknown>
   content?: unknown
   isError?: boolean
+  mimeType?: string
+  bytes?: number
+  data?: string
+  mediaPath?: string
 }
 
 export interface ChatMessage {

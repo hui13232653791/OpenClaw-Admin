@@ -23,7 +23,7 @@ import {
   useMessage,
 } from 'naive-ui'
 import type { SelectOption } from 'naive-ui'
-import { CopyOutline, RefreshOutline, SendOutline, StopCircleOutline } from '@vicons/ionicons5'
+import { CopyOutline, RefreshOutline, SendOutline, StopCircleOutline, ChevronBackOutline, ChevronForwardOutline } from '@vicons/ionicons5'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
@@ -62,6 +62,9 @@ const showAgentDetails = ref(false)
 const aborting = ref(false)
 const nowMs = ref(Date.now())
 let nowTimer: ReturnType<typeof setInterval> | null = null
+
+// 侧边栏折叠状态
+const sideCollapsed = ref(false)
 
 const roleFilterOptions = computed<SelectOption[]>(() => [
   { label: t('pages.chat.filters.roles.all'), value: 'all' },
@@ -130,6 +133,19 @@ async function copyToClipboard(text: string) {
   } catch {
     message.error(t('common.copyFailed'))
   }
+}
+
+const imagePreviewUrl = ref<string | null>(null)
+const showImagePreviewModal = ref(false)
+
+function openImagePreview(url: string) {
+  imagePreviewUrl.value = url
+  showImagePreviewModal.value = true
+}
+
+function closeImagePreview() {
+  showImagePreviewModal.value = false
+  imagePreviewUrl.value = null
 }
 
 const sessionOptions = computed(() => {
@@ -353,7 +369,104 @@ function parseToolResultMessage(item: ChatMessage): StructuredMessageView | null
     toolResults,
     validationErrors: [],
     plainTexts: [],
+    images: [],
   }
+}
+
+function buildImageUrl(part: ChatMessageContent): string | undefined {
+  if (part.data) {
+    const mimeType = part.mimeType || 'image/png'
+    return `data:${mimeType};base64,${part.data}`
+  }
+  if (part.mediaPath) {
+    let mediaPath = part.mediaPath
+    
+    // 处理 MEDIA: 前缀
+    if (mediaPath.startsWith('MEDIA:')) {
+      mediaPath = mediaPath.slice(6)
+    }
+    
+    // 从 file:// URL 中提取相对路径
+    // 例如: file:///C:/Users/xxx/.openclaw/media/browser/xxx.png -> browser/xxx.png
+    if (mediaPath.startsWith('file://')) {
+      // 查找 .openclaw/media/ 后面的相对路径
+      const mediaIndex = mediaPath.indexOf('.openclaw/media/')
+      if (mediaIndex !== -1) {
+        mediaPath = mediaPath.slice(mediaIndex + '.openclaw/media/'.length)
+      } else {
+        // 如果没有找到标准路径，尝试提取文件名
+        const lastSlash = mediaPath.lastIndexOf('/')
+        if (lastSlash !== -1) {
+          mediaPath = `browser/${mediaPath.slice(lastSlash + 1)}`
+        }
+      }
+    }
+    
+    return `/api/media?path=${encodeURIComponent(mediaPath)}`
+  }
+  return undefined
+}
+
+/**
+ * 从路径中提取相对于媒体目录的相对路径
+ */
+function normalizeMediaPath(path: string): string {
+  // 处理 MEDIA: 前缀
+  if (path.startsWith('MEDIA:')) {
+    path = path.slice(6)
+  }
+  
+  // 从 file:// URL 中提取相对路径
+  // 例如: file:///C:/Users/xxx/.openclaw/media/browser/xxx.png -> browser/xxx.png
+  if (path.startsWith('file://')) {
+    const mediaIndex = path.indexOf('.openclaw/media/')
+    if (mediaIndex !== -1) {
+      return path.slice(mediaIndex + '.openclaw/media/'.length)
+    }
+    // 如果没有找到标准路径，尝试提取文件名
+    const lastSlash = path.lastIndexOf('/')
+    if (lastSlash !== -1) {
+      return `browser/${path.slice(lastSlash + 1)}`
+    }
+  }
+  
+  return path
+}
+
+function extractImageFromText(text: string): { images: ImageItemView[]; cleanedText: string } {
+  const images: ImageItemView[] = []
+  let cleanedText = text
+  
+  const mdImageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g
+  let match
+  while ((match = mdImageRegex.exec(text)) !== null) {
+    const imagePath = match[2]
+    if (imagePath && imagePath.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
+      const normalizedPath = normalizeMediaPath(imagePath)
+      const imageUrl = `/api/media?path=${encodeURIComponent(normalizedPath)}`
+      images.push({
+        mimeType: `image/${imagePath.split('.').pop()?.toLowerCase() || 'png'}`,
+        url: imageUrl,
+      })
+      cleanedText = cleanedText.replace(match[0], '').trim()
+    }
+  }
+  
+  const mediaPathRegex = /MEDIA:([^\s\n]+)/g
+  while ((match = mediaPathRegex.exec(text)) !== null) {
+    const imagePath = match[1]
+    if (imagePath && imagePath.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
+      const normalizedPath = normalizeMediaPath(imagePath)
+      const imageUrl = `/api/media?path=${encodeURIComponent(normalizedPath)}`
+      images.push({
+        mimeType: `image/${imagePath.split('.').pop()?.toLowerCase() || 'png'}`,
+        url: imageUrl,
+      })
+      cleanedText = cleanedText.replace(match[0], '').trim()
+    }
+  }
+  
+  return { images, cleanedText }
 }
 
 function parseRawContent(rawContent: ChatMessageContent[]): StructuredMessageView | null {
@@ -361,10 +474,27 @@ function parseRawContent(rawContent: ChatMessageContent[]): StructuredMessageVie
   const thinkings: ThinkingItemView[] = []
   const toolResults: ToolResultItemView[] = []
   const plainTexts: string[] = []
+  const images: ImageItemView[] = []
 
   for (const part of rawContent) {
     if (part.type === 'text' && part.text) {
-      plainTexts.push(part.text)
+      const { images: extractedImages, cleanedText } = extractImageFromText(part.text)
+      images.push(...extractedImages)
+      
+      const trimmedText = cleanedText.trim()
+      if (trimmedText.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
+        // Add "browser/" prefix for image filenames without a path
+        const imagePath = trimmedText.includes('/') ? trimmedText : `browser/${trimmedText}`
+        const imageUrl = `/api/media?path=${encodeURIComponent(imagePath)}`
+        images.push({
+          mimeType: `image/${trimmedText.split('.').pop()?.toLowerCase() || 'png'}`,
+          url: imageUrl,
+        })
+        // Also add the image filename to plainTexts to display it as text
+        plainTexts.push(cleanedText)
+      } else if (trimmedText) {
+        plainTexts.push(cleanedText)
+      }
     }
     
     if (part.type === 'thinking' && part.thinking) {
@@ -405,16 +535,30 @@ function parseRawContent(rawContent: ChatMessageContent[]): StructuredMessageVie
         contentText = String(rawContent || '')
       }
       
+      const { images: extractedImages, cleanedText } = extractImageFromText(contentText)
+      images.push(...extractedImages)
+      
       toolResults.push({
         id: part.id,
         name: part.name || 'unknown',
         status: part.isError ? 'error' : undefined,
-        content: contentText,
+        content: cleanedText,
+      })
+    }
+
+    if (part.type === 'image') {
+      const imageUrl = buildImageUrl(part)
+      images.push({
+        mimeType: part.mimeType,
+        bytes: part.bytes,
+        data: part.data,
+        mediaPath: part.mediaPath,
+        url: imageUrl,
       })
     }
   }
 
-  if (toolCalls.length === 0 && thinkings.length === 0 && toolResults.length === 0 && plainTexts.length === 0) {
+  if (toolCalls.length === 0 && thinkings.length === 0 && toolResults.length === 0 && plainTexts.length === 0 && images.length === 0) {
     return null
   }
 
@@ -424,6 +568,7 @@ function parseRawContent(rawContent: ChatMessageContent[]): StructuredMessageVie
     toolResults,
     validationErrors: [],
     plainTexts,
+    images,
   }
 }
 
@@ -449,7 +594,7 @@ const visibleMessageEntries = computed<RenderMessage[]>(() => {
     
     if (item.rawContent && Array.isArray(item.rawContent)) {
       const structured = parseRawContent(item.rawContent)
-      if (structured && (structured.toolCalls.length > 0 || structured.thinkings.length > 0 || structured.toolResults.length > 0 || structured.plainTexts.length > 0)) {
+      if (structured && (structured.toolCalls.length > 0 || structured.thinkings.length > 0 || structured.toolResults.length > 0 || structured.plainTexts.length > 0 || structured.images.length > 0)) {
         rendered.push({
           key: item.id || `${item.role}-${idx}`,
           item,
@@ -502,12 +647,21 @@ interface ToolValidationErrorItemView {
   argumentsText?: string
 }
 
+interface ImageItemView {
+  mimeType?: string
+  bytes?: number
+  data?: string
+  mediaPath?: string
+  url?: string
+}
+
 interface StructuredMessageView {
   toolCalls: ToolCallItemView[]
   thinkings: ThinkingItemView[]
   toolResults: ToolResultItemView[]
   validationErrors: ToolValidationErrorItemView[]
   plainTexts: string[]
+  images: ImageItemView[]
 }
 
 interface RenderMessage {
@@ -1758,6 +1912,7 @@ function parseStructuredMessage(content: string): StructuredMessageView | null {
       toolResults: [],
       validationErrors: [validationError],
       plainTexts: [],
+      images: [],
     }
   }
   const rawItems = parsed.items
@@ -1765,6 +1920,7 @@ function parseStructuredMessage(content: string): StructuredMessageView | null {
   const toolCalls: ToolCallItemView[] = []
   const thinkings: ThinkingItemView[] = []
   const toolResults: ToolResultItemView[] = []
+  const images: ImageItemView[] = []
   let recognized = 0
 
   for (const rowValue of rawItems) {
@@ -1855,13 +2011,32 @@ function parseStructuredMessage(content: string): StructuredMessageView | null {
     }
   }
 
-  if (!recognized) return null
+  // 检查plainLines中是否包含图片名称（delivery-mirror类型消息）
+  const imagePlainTexts: string[] = []
+  for (const line of parsed.plainLines) {
+    const { images: extractedImages, cleanedText } = extractImageFromText(line)
+    images.push(...extractedImages)
+    
+    const trimmedLine = cleanedText.trim()
+    if (trimmedLine.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
+      const imageUrl = `/api/media?path=${encodeURIComponent(trimmedLine)}`
+      images.push({
+        mimeType: `image/${trimmedLine.split('.').pop()?.toLowerCase() || 'png'}`,
+        url: imageUrl,
+      })
+    } else if (trimmedLine) {
+      imagePlainTexts.push(cleanedText)
+    }
+  }
+
+  if (!recognized && images.length === 0) return null
   return {
     toolCalls,
     thinkings,
     toolResults,
     validationErrors: [],
-    plainTexts: parsed.plainLines,
+    plainTexts: imagePlainTexts,
+    images,
   }
 }
 
@@ -2422,9 +2597,14 @@ async function handleSend() {
         </NSpace>
       </template>
 
-      <NGrid cols="1 l:3" responsive="screen" :x-gap="12" :y-gap="12" class="chat-grid">
-        <NGridItem :span="1" class="chat-grid-side">
-          <NCard embedded :bordered="false" class="chat-side-card">
+      <NGrid cols="1 l:3" responsive="screen" :x-gap="12" :y-gap="12" class="chat-grid" :class="{ 'chat-grid--collapsed': sideCollapsed }">
+        <NGridItem :span="1" class="chat-grid-side" :class="{ 'chat-grid-side--collapsed': sideCollapsed }">
+          <!-- 折叠按钮 -->
+          <div class="chat-side-collapse-btn" @click="sideCollapsed = !sideCollapsed">
+            <NIcon :component="ChevronBackOutline" size="14" />
+          </div>
+          
+          <NCard v-show="!sideCollapsed" embedded :bordered="false" class="chat-side-card">
             <NSpace vertical :size="12">
               <div class="chat-side-stats">
                 <div class="chat-stat-item">
@@ -2550,7 +2730,12 @@ async function handleSend() {
           </NCard>
         </NGridItem>
 
-        <NGridItem :span="2" class="chat-grid-main">
+        <NGridItem :span="sideCollapsed ? 3 : 2" class="chat-grid-main">
+          <!-- 展开按钮（侧边栏折叠时显示） -->
+          <div v-if="sideCollapsed" class="chat-side-expand-btn" @click="sideCollapsed = false">
+            <NIcon :component="ChevronForwardOutline" size="14" />
+          </div>
+          
           <div class="chat-main-column">
             <NCard embedded :bordered="false" class="chat-transcript-card">
               <NSpace justify="space-between" align="center" style="margin-bottom: 10px;">
@@ -2743,6 +2928,23 @@ async function handleSend() {
                                 </template>
                                 {{ t('common.copy') }}
                               </NTooltip>
+                            </div>
+                          </div>
+
+                          <div v-if="entry.structured.images.length" class="chat-images-container">
+                            <div
+                              v-for="(img, imgIndex) in entry.structured.images"
+                              :key="`${entry.key}-img-${imgIndex}`"
+                              class="chat-image-wrapper"
+                            >
+                              <img
+                                v-if="img.url"
+                                :src="img.url"
+                                class="chat-image"
+                                loading="lazy"
+                                @click="openImagePreview(img.url)"
+                              />
+                              <span v-else class="chat-image-placeholder">{{ t('pages.chat.image.unavailable') }}</span>
                             </div>
                           </div>
                         </div>
@@ -3052,6 +3254,19 @@ async function handleSend() {
         </NSpace>
       </template>
     </NModal>
+
+    <NModal
+      v-model:show="showImagePreviewModal"
+      preset="card"
+      :title="t('pages.chat.image.preview')"
+      style="width: 90vw; max-width: 1200px;"
+      :mask-closable="true"
+      @update:show="(val: boolean) => { if (!val) closeImagePreview() }"
+    >
+      <div v-if="imagePreviewUrl" class="image-preview-container">
+        <img :src="imagePreviewUrl" class="image-preview-full" />
+      </div>
+    </NModal>
   </div>
 </template>
 
@@ -3092,6 +3307,74 @@ async function handleSend() {
   .chat-grid-main {
     min-height: 0;
     display: flex;
+    position: relative;
+  }
+
+  /* 折叠按钮样式 */
+  .chat-side-collapse-btn {
+    position: absolute;
+    right: -8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 16px;
+    height: 48px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 0 4px 4px 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 10;
+    transition: all 0.2s ease;
+    opacity: 0.6;
+  }
+
+  .chat-side-collapse-btn:hover {
+    background: var(--bg-secondary);
+    opacity: 1;
+  }
+
+  /* 展开按钮样式（主内容区域左侧） */
+  .chat-side-expand-btn {
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 16px;
+    height: 48px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px 0 0 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 10;
+    transition: all 0.2s ease;
+    opacity: 0.6;
+  }
+
+  .chat-side-expand-btn:hover {
+    background: var(--bg-secondary);
+    opacity: 1;
+  }
+
+  /* 侧边栏折叠状态 */
+  .chat-grid-side--collapsed {
+    width: 0 !important;
+    min-width: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: hidden;
+  }
+
+  .chat-grid-side--collapsed .chat-side-card {
+    display: none;
+  }
+
+  .chat-grid-side--collapsed .chat-side-collapse-btn {
+    display: none;
   }
 
   .chat-side-card {
@@ -3944,6 +4227,10 @@ body.wide-mode .chat-grid {
   grid-template-rows: 1fr !important;
 }
 
+body.wide-mode .chat-grid--collapsed {
+  grid-template-columns: 1fr !important;
+}
+
 body.wide-mode .chat-grid > div {
   grid-row: 1 !important;
 }
@@ -3996,5 +4283,55 @@ body.wide-mode .chat-bubble {
   .tool-call-grid {
     grid-template-columns: 1fr;
   }
+}
+
+.chat-images-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chat-image-wrapper {
+  max-width: 300px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.chat-image {
+  display: block;
+  max-width: 100%;
+  max-height: 300px;
+  object-fit: contain;
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+
+.chat-image:hover {
+  transform: scale(1.02);
+}
+
+.chat-image-placeholder {
+  display: block;
+  padding: 16px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+}
+
+.image-preview-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+}
+
+.image-preview-full {
+  max-width: 100%;
+  max-height: 80vh;
+  object-fit: contain;
+  border-radius: 8px;
 }
 </style>
