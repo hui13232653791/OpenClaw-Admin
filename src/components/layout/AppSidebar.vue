@@ -91,7 +91,7 @@ function handleSelect(key: string) {
         strong
         style="font-size: 18px; white-space: nowrap; letter-spacing: -0.5px;"
       >
-        OpenClaw
+        OpenClaw-Admin
       </NText>
     </div>
 

@@ -3,11 +3,14 @@ import { randomUUID } from 'crypto'
 import EventEmitter from 'events'
 import { createHash, generateKeyPairSync, sign } from 'crypto'
 
+const APP_VERSION = process.env.VITE_APP_VERSION || process.env.npm_package_version || ''
+
 export class OpenClawGateway extends EventEmitter {
-  constructor(url, authToken) {
+  constructor(url, authToken, authPassword) {
     super()
     this.url = url
     this.authToken = authToken
+    this.authPassword = authPassword // Gateway 密码认证
     this.ws = null
     this.isConnected = false
     this.pendingCalls = new Map()
@@ -24,7 +27,9 @@ export class OpenClawGateway extends EventEmitter {
       this.ws.close()
     }
 
-    const wsUrl = this.authToken ? `${this.url}?auth=${this.authToken}` : this.url
+    // URL query 参数：token 优先，password 作为备选
+    const authParam = this.authToken || this.authPassword || ''
+    const wsUrl = authParam ? `${this.url}?auth=${authParam}` : this.url
     
     try {
       this.ws = new WebSocket(wsUrl)
@@ -85,7 +90,7 @@ export class OpenClawGateway extends EventEmitter {
       client: {
         id: 'cli',
         displayName: 'OpenClaw Web Backend',
-        version: '0.1.0',
+        version: APP_VERSION,
         platform: process.platform,
         mode: 'cli',
       },
@@ -96,9 +101,10 @@ export class OpenClawGateway extends EventEmitter {
       permissions: {},
       auth: {
         token: this.authToken || '',
+        password: this.authPassword || '', // 支持 password 认证
       },
       locale: 'zh-CN',
-      userAgent: 'OpenClaw-Web-Backend/0.1.0',
+      userAgent: `OpenClaw-Web-Backend/${APP_VERSION}`,
     }
 
     try {

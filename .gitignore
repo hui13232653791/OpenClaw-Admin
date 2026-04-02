@@ -2,3 +2,7 @@ node_modules
 dist
 .vscode
 backups
+.env
+!.env.example
+data/wizard.db-shm
+data/wizard.db-wal

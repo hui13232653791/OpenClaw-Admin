@@ -24,6 +24,8 @@ const wsStore = useWebSocketStore()
 const authStore = useAuthStore()
 const { t } = useI18n()
 const message = useMessage()
+const appTitle = import.meta.env.VITE_APP_TITLE || 'OpenClaw Admin'
+const appVersion = import.meta.env.VITE_APP_VERSION || ''
 
 const loading = ref(false)
 const saving = ref(false)
@@ -32,6 +34,7 @@ const configForm = ref({
   AUTH_PASSWORD: '',
   OPENCLAW_WS_URL: '',
   OPENCLAW_AUTH_TOKEN: '',
+  OPENCLAW_AUTH_PASSWORD: '', // Gateway 密码认证
 })
 
 const themeOptions = computed(() => ([
@@ -69,6 +72,7 @@ async function loadConfig() {
         AUTH_PASSWORD: data.config.AUTH_PASSWORD || '',
         OPENCLAW_WS_URL: data.config.OPENCLAW_WS_URL || '',
         OPENCLAW_AUTH_TOKEN: data.config.OPENCLAW_AUTH_TOKEN || '',
+        OPENCLAW_AUTH_PASSWORD: data.config.OPENCLAW_AUTH_PASSWORD || '',
       }
     }
   } catch (e) {
@@ -155,6 +159,15 @@ onMounted(() => {
             />
           </NFormItem>
           
+          <NFormItem :label="t('pages.settings.openclawPassword')">
+            <NInput
+              v-model:value="configForm.OPENCLAW_AUTH_PASSWORD"
+              type="password"
+              show-password-on="click"
+              :placeholder="t('pages.settings.openclawPasswordPlaceholder')"
+            />
+          </NFormItem>
+          
           <NFormItem :label="''">
             <NSpace>
               <NButton type="primary" :loading="saving" @click="saveConfig">
@@ -184,7 +197,7 @@ onMounted(() => {
 
     <NCard :title="t('pages.settings.about')" class="app-card">
       <NSpace vertical :size="8">
-        <NText>OpenClaw Admin v0.1.0</NText>
+        <NText>{{ appTitle }} v{{ appVersion }}</NText>
         <NText depth="3" style="font-size: 13px;">
           {{ t('pages.settings.aboutLine1') }}
         </NText>

@@ -25,6 +25,7 @@ function loadEnvConfig() {
       PORT: 3001,
       OPENCLAW_WS_URL: 'ws://localhost:18789',
       OPENCLAW_AUTH_TOKEN: '',
+      OPENCLAW_AUTH_PASSWORD: '', // Gateway 密码认证
       DEV_FRONTEND_URL: 'http://localhost:3000',
       AUTH_USERNAME: '',
       AUTH_PASSWORD: '',
@@ -37,6 +38,7 @@ function loadEnvConfig() {
     PORT: parsed.PORT || 3001,
     OPENCLAW_WS_URL: parsed.OPENCLAW_WS_URL || 'ws://localhost:18789',
     OPENCLAW_AUTH_TOKEN: parsed.OPENCLAW_AUTH_TOKEN || '',
+    OPENCLAW_AUTH_PASSWORD: parsed.OPENCLAW_AUTH_PASSWORD || '',
     DEV_FRONTEND_URL: parsed.DEV_FRONTEND_URL || 'http://localhost:3000',
     AUTH_USERNAME: parsed.AUTH_USERNAME || '',
     AUTH_PASSWORD: parsed.AUTH_PASSWORD || '',
@@ -57,7 +59,7 @@ const sessions = new Map()
 app.use(cors())
 app.use(express.json())
 
-let gateway = new OpenClawGateway(envConfig.OPENCLAW_WS_URL, envConfig.OPENCLAW_AUTH_TOKEN)
+let gateway = new OpenClawGateway(envConfig.OPENCLAW_WS_URL, envConfig.OPENCLAW_AUTH_TOKEN, envConfig.OPENCLAW_AUTH_PASSWORD)
 
 const sseClients = new Map()
 
@@ -221,7 +223,7 @@ app.get('/api/config', authMiddleware, (req, res) => {
 
 app.post('/api/config', authMiddleware, (req, res) => {
   try {
-    const { AUTH_USERNAME, AUTH_PASSWORD, OPENCLAW_WS_URL, OPENCLAW_AUTH_TOKEN } = req.body
+    const { AUTH_USERNAME, AUTH_PASSWORD, OPENCLAW_WS_URL, OPENCLAW_AUTH_TOKEN, OPENCLAW_AUTH_PASSWORD } = req.body
     
     const existingContent = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : ''
     const existing = parseEnvFile(existingContent)
@@ -230,6 +232,7 @@ app.post('/api/config', authMiddleware, (req, res) => {
     if (AUTH_PASSWORD !== undefined) existing.AUTH_PASSWORD = AUTH_PASSWORD
     if (OPENCLAW_WS_URL !== undefined) existing.OPENCLAW_WS_URL = OPENCLAW_WS_URL
     if (OPENCLAW_AUTH_TOKEN !== undefined) existing.OPENCLAW_AUTH_TOKEN = OPENCLAW_AUTH_TOKEN
+    if (OPENCLAW_AUTH_PASSWORD !== undefined) existing.OPENCLAW_AUTH_PASSWORD = OPENCLAW_AUTH_PASSWORD
     
     const newContent = stringifyEnvFile(existing)
     writeFileSync(envPath, newContent, 'utf-8')
@@ -239,11 +242,12 @@ app.post('/api/config', authMiddleware, (req, res) => {
     
     const wsUrlChanged = oldConfig.OPENCLAW_WS_URL !== envConfig.OPENCLAW_WS_URL
     const tokenChanged = oldConfig.OPENCLAW_AUTH_TOKEN !== envConfig.OPENCLAW_AUTH_TOKEN
+    const passwordChanged = oldConfig.OPENCLAW_AUTH_PASSWORD !== envConfig.OPENCLAW_AUTH_PASSWORD
     
-    if (wsUrlChanged || tokenChanged) {
+    if (wsUrlChanged || tokenChanged || passwordChanged) {
       console.log('[Config] Gateway config changed, reconnecting...')
       gateway.disconnect()
-      gateway = new OpenClawGateway(envConfig.OPENCLAW_WS_URL, envConfig.OPENCLAW_AUTH_TOKEN)
+      gateway = new OpenClawGateway(envConfig.OPENCLAW_WS_URL, envConfig.OPENCLAW_AUTH_TOKEN, envConfig.OPENCLAW_AUTH_PASSWORD)
       
       gateway.on('connected', (info) => {
         console.log('[Gateway] Connected to OpenClaw:', info?.server?.version)
@@ -647,8 +651,9 @@ app.get('/api/files/list', authMiddleware, async (req, res) => {
 
 app.get('/api/files/get', authMiddleware, async (req, res) => {
   try {
-    const relPath = req.query.path || req.query.name
+    let relPath = req.query.path || req.query.name
     const workspaceParam = req.query.workspace || ''
+    const binary = req.query.binary === 'true'
     
     if (!relPath) {
       return res.status(400).json({ ok: false, error: { message: 'Path is required' } })
@@ -658,10 +663,22 @@ app.get('/api/files/get', authMiddleware, async (req, res) => {
       return res.status(400).json({ ok: false, error: { message: 'Workspace parameter is required' } })
     }
     
+    // Handle double URL encoding from img src
+    try {
+      let decoded = decodeURIComponent(relPath)
+      // Check if it was double-encoded
+      if (decoded.includes('%')) {
+        decoded = decodeURIComponent(decoded)
+      }
+      relPath = decoded
+    } catch (e) {
+      // If decode fails, use original
+    }
+    
     const workspaceBase = expandHomePath(workspaceParam)
     const absPath = safePath(relPath, workspaceBase)
     
-    console.log('[Files] Get:', { relPath, workspaceParam, absPath })
+    console.log('[Files] Get:', { relPath, workspaceParam, absPath, binary })
     
     if (!absPath) {
       return res.status(400).json({ ok: false, error: { message: 'Invalid path' } })
@@ -678,6 +695,51 @@ app.get('/api/files/get', authMiddleware, async (req, res) => {
     
     const ext = extname(absPath).slice(1).toLowerCase()
     const imgExts = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp']
+    const pdfExts = ['pdf']
+    
+    if (binary && imgExts.includes(ext)) {
+      const contentTypeMap = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        gif: 'image/gif',
+        svg: 'image/svg+xml',
+        webp: 'image/webp',
+        ico: 'image/x-icon',
+        bmp: 'image/bmp',
+      }
+      
+      const contentType = contentTypeMap[ext] || 'application/octet-stream'
+      res.setHeader('Content-Type', contentType)
+      res.setHeader('Content-Length', stats.size)
+      
+      const stream = createReadStream(absPath)
+      stream.pipe(res)
+      
+      stream.on('error', (err) => {
+        console.error('[Files] Stream error:', err.message)
+        if (!res.headersSent) {
+          res.status(500).json({ ok: false, error: { message: err.message } })
+        }
+      })
+      return
+    }
+    
+    if (binary && pdfExts.includes(ext)) {
+      res.setHeader('Content-Type', 'application/pdf')
+      res.setHeader('Content-Length', stats.size)
+      
+      const stream = createReadStream(absPath)
+      stream.pipe(res)
+      
+      stream.on('error', (err) => {
+        console.error('[Files] PDF stream error:', err.message)
+        if (!res.headersSent) {
+          res.status(500).json({ ok: false, error: { message: err.message } })
+        }
+      })
+      return
+    }
     
     if (imgExts.includes(ext)) {
       const buffer = readFileSync(absPath)

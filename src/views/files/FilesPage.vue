@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref, watch, nextTick } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
 import {
   NCard,
   NInput,
@@ -56,12 +56,18 @@ import {
   AddCircleOutline,
   ReorderFourOutline,
   PersonOutline,
+  ExpandOutline,
+  ContractOutline,
+  DocumentTextOutline,
+  ChevronDownOutline,
+  ChevronForwardOutline,
 } from '@vicons/ionicons5'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { useMemoryStore } from '@/stores/memory'
 import { formatRelativeTime } from '@/utils/format'
-import { renderSimpleMarkdown } from '@/utils/markdown'
+import { renderSimpleMarkdown, extractTocHeadings } from '@/utils/markdown'
+import PdfViewer from '@/components/common/PdfViewer.vue'
 
 interface FileEntry {
   name: string
@@ -103,6 +109,7 @@ const editedContent = ref('')
 
 const showPreviewModal = ref(false)
 const showEditorModal = ref(false)
+const isEditorMaximized = ref(false)
 const showCreateModal = ref(false)
 const showRenameModal = ref(false)
 const createType = ref<'file' | 'directory'>('file')
@@ -119,6 +126,7 @@ const editorTextarea = ref<HTMLTextAreaElement | null>(null)
 const imgExts = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp']
 const mdExts = ['md', 'markdown']
 const codeExts = ['ts', 'tsx', 'js', 'jsx', 'vue', 'json', 'yaml', 'yml', 'py', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'css', 'scss', 'html', 'xml', 'sh', 'bash']
+const pdfExts = ['pdf']
 
 const isImageFile = computed(() => {
   if (!selectedFile.value) return false
@@ -138,8 +146,126 @@ const isCodeFile = computed(() => {
   return codeExts.includes(ext)
 })
 
+const isPdfFile = computed(() => {
+  if (!selectedFile.value) return false
+  const ext = selectedFile.value.extension?.toLowerCase() || ''
+  return pdfExts.includes(ext)
+})
+
+const pdfUrl = computed(() => {
+  if (!selectedFile.value || !currentWorkspace.value) return ''
+  return `/api/files/get?path=${encodeURIComponent(selectedFile.value.path)}&workspace=${encodeURIComponent(currentWorkspace.value)}&binary=true`
+})
+
 const imageUrl = ref<string | null>(null)
 const previewTab = ref<'preview' | 'source'>('preview')
+const isPreviewMaximized = ref(false)
+const tocExpandedState = ref<Record<string, boolean>>({})
+
+const tocHeadings = computed(() => {
+  if (!isMarkdownFile.value || !fileContent.value) return []
+  return extractTocHeadings(fileContent.value)
+})
+
+const editorTocHeadings = computed(() => {
+  if (!isMarkdownFile.value || !editedContent.value) return []
+  return extractTocHeadings(editedContent.value)
+})
+
+function getTocKey(heading: { text: string; level: number }): string {
+  return `h${heading.level}-${heading.text.toLowerCase().replace(/[^\w\u4e00-\u9fa5]+/g, '-')}`
+}
+
+function isTocExpanded(heading: { text: string; level: number }): boolean {
+  const key = getTocKey(heading)
+  if (tocExpandedState.value[key] === undefined) {
+    return true
+  }
+  return tocExpandedState.value[key]
+}
+
+function toggleTocExpand(heading: { text: string; level: number }) {
+  const key = getTocKey(heading)
+  tocExpandedState.value[key] = !isTocExpanded(heading)
+}
+
+function hasVisibleChildren(headings: { level: number; text: string; id: string }[], currentIndex: number, parentLevel: number): boolean {
+  for (let i = currentIndex + 1; i < headings.length; i++) {
+    const heading = headings[i]
+    if (heading && heading.level <= parentLevel) break
+    return true
+  }
+  return false
+}
+
+function isHeadingVisible(headings: { level: number; text: string; id: string }[], currentIndex: number): boolean {
+  const current = headings[currentIndex]
+  if (!current) return false
+  if (current.level === 1) return true
+  
+  for (let i = currentIndex - 1; i >= 0; i--) {
+    const prev = headings[i]
+    if (prev && prev.level < current.level) {
+      return isTocExpanded(prev)
+    }
+  }
+  return true
+}
+
+function getTocNumber(headings: { level: number; text: string; id: string }[], currentIndex: number): string {
+  const current = headings[currentIndex]
+  if (!current) return ''
+  
+  const counters: number[] = [0, 0, 0, 0, 0, 0]
+  
+  for (let i = 0; i <= currentIndex; i++) {
+    const h = headings[i]
+    if (!h) continue
+    
+    if (!isHeadingVisible(headings, i)) continue
+    
+    const level = h.level
+    const idx = level - 1
+    if (idx >= 0 && idx < 6) {
+      counters[idx] = (counters[idx] ?? 0) + 1
+    }
+    
+    for (let j = level; j < 6; j++) {
+      counters[j] = 0
+    }
+  }
+  
+  const parts: string[] = []
+  for (let i = 0; i < current.level; i++) {
+    const count = counters[i] ?? 0
+    if (count > 0) {
+      parts.push(String(count))
+    }
+  }
+  
+  return parts.join('.')
+}
+
+function scrollToHeading(id: string) {
+  const element = document.getElementById(id)
+  if (element) {
+    element.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+
+function scrollToEditorHeading(id: string) {
+  const previewPane = document.querySelector('.preview-pane')
+  if (previewPane) {
+    const element = previewPane.querySelector(`#${id}`)
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }
+}
+
+function generateHeadingId(text: string): string {
+  return text.toLowerCase().replace(/[^\w\u4e00-\u9fa5]+/g, '-')
+}
 
 const agentOptions = computed<AgentSelectOption[]>(() =>
   memoryStore.agents.map((agent) => ({
@@ -274,6 +400,7 @@ const tableColumns = computed<DataTableColumns<FileEntry>>(() => [
       } else {
         const ext = row.extension?.toLowerCase() || ''
         const isImage = imgExts.includes(ext)
+        const isPdf = pdfExts.includes(ext)
         
         actions.push(
           h(NButton, {
@@ -293,7 +420,7 @@ const tableColumns = computed<DataTableColumns<FileEntry>>(() => [
             default: () => t('pages.files.actions.download'),
           })
         )
-        if (!isImage) {
+        if (!isImage && !isPdf) {
           actions.push(
             h(NButton, {
               size: 'tiny',
@@ -341,6 +468,7 @@ function getFileIcon(ext: string): any {
   const extLower = ext.toLowerCase().replace('.', '')
   if (codeExts.includes(extLower)) return CodeSlashOutline
   if (imgExts.includes(extLower)) return ImageOutline
+  if (pdfExts.includes(extLower)) return DocumentTextOutline
   const videoExts = ['mp4', 'webm', 'mov', 'avi', 'mkv']
   if (videoExts.includes(extLower)) return VideocamOutline
   const audioExts = ['mp3', 'wav', 'ogg', 'flac', 'aac']
@@ -781,8 +909,38 @@ function readFileContent(file: File): Promise<string> {
 }
 
 function renderMarkdown(content: string): string {
-  return renderSimpleMarkdown(content)
+  return renderSimpleMarkdown(content, {
+    imageBasePath: selectedFile.value?.path,
+    workspace: currentWorkspace.value || undefined,
+    authToken: authStore.token || undefined,
+  })
 }
+
+function handleCodeCopy(event: Event) {
+  const target = event.target as HTMLElement
+  const button = target.closest('.code-copy-btn') as HTMLButtonElement
+  if (!button) return
+  
+  const code = button.dataset.code || ''
+  navigator.clipboard.writeText(code).then(() => {
+    button.classList.add('copied')
+    button.title = 'Copied!'
+    setTimeout(() => {
+      button.classList.remove('copied')
+      button.title = 'Copy code'
+    }, 2000)
+  }).catch((err) => {
+    console.error('Failed to copy:', err)
+  })
+}
+
+onMounted(() => {
+  document.addEventListener('click', handleCodeCopy)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', handleCodeCopy)
+})
 
 function insertText(before: string, after: string = '') {
   if (!editorTextarea.value) return
@@ -862,6 +1020,78 @@ function insertTable() {
 | Cell 4   | Cell 5   | Cell 6   |
 `
   insertText(table)
+}
+
+const imageUploading = ref(false)
+
+async function handleEditorPaste(event: ClipboardEvent) {
+  const items = event.clipboardData?.items
+  if (!items) return
+  
+  const imageItems = Array.from(items).filter(item => item.type.startsWith('image/'))
+  if (imageItems.length === 0) return
+  
+  event.preventDefault()
+  
+  for (const item of imageItems) {
+    const file = item.getAsFile()
+    if (!file) continue
+    
+    await uploadPastedImage(file)
+  }
+}
+
+async function uploadPastedImage(file: File) {
+  if (!currentWorkspace.value || !selectedFile.value) {
+    message.error(t('pages.files.uploadFailed') + ': No workspace selected')
+    return
+  }
+  
+  imageUploading.value = true
+  
+  try {
+    const mdFilePath = selectedFile.value.path || ''
+    const mdFileDir = mdFilePath.includes('/') ? mdFilePath.substring(0, mdFilePath.lastIndexOf('/')) : ''
+    
+    const imagesDir = mdFileDir ? `${mdFileDir}/images` : 'images'
+    
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const ext = file.name.split('.').pop() || 'png'
+    const fileName = `image-${timestamp}.${ext}`
+    const imagePath = `${imagesDir}/${fileName}`
+    
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('path', imagePath)
+    formData.append('workspace', currentWorkspace.value)
+    
+    const token = authStore.token
+    const response = await fetch('/api/files/upload', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      },
+      body: formData
+    })
+    
+    const data = await response.json()
+    
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error?.message || 'Failed to upload image')
+    }
+    
+    const relativePath = `./images/${fileName}`
+    const markdownImage = `![${file.name.replace(/\.[^/.]+$/, '')}](${relativePath})`
+    
+    insertText(markdownImage)
+    
+    message.success(t('pages.files.imageUploadSuccess'))
+  } catch (e: any) {
+    console.error('[FilesPage] uploadPastedImage error:', e)
+    message.error(t('pages.files.uploadFailed') + ': ' + (e?.message || ''))
+  } finally {
+    imageUploading.value = false
+  }
 }
 
 async function initialize() {
@@ -990,14 +1220,26 @@ onMounted(() => {
       </NText>
     </NCard>
 
-    <NModal v-model:show="showPreviewModal" preset="card" style="width: 90%; max-width: 900px;" :title="selectedFile?.name || t('pages.files.preview')">
+    <NModal 
+      v-model:show="showPreviewModal" 
+      preset="card" 
+      :style="isPreviewMaximized ? 'width: 100vw; height: 100vh; max-width: 100vw; top: 0; left: 0; margin: 0;' : 'width: 90%; max-width: 1200px;'" 
+      :content-style="isPreviewMaximized ? 'height: calc(100vh - 80px); overflow: hidden;' : ''"
+      :title="selectedFile?.name || t('pages.files.preview')"
+      :closable="!isPreviewMaximized"
+      :mask-closable="!isPreviewMaximized"
+    >
       <template #header-extra>
         <NSpace :size="8">
+          <NButton size="small" quaternary @click="isPreviewMaximized = !isPreviewMaximized">
+            <template #icon><NIcon :component="isPreviewMaximized ? ContractOutline : ExpandOutline" /></template>
+            {{ isPreviewMaximized ? t('pages.files.actions.exitFullscreen') : t('pages.files.actions.fullscreen') }}
+          </NButton>
           <NButton size="small" quaternary @click="downloadFile(selectedFile!)">
             <template #icon><NIcon :component="CloudDownloadOutline" /></template>
             {{ t('pages.files.actions.download') }}
           </NButton>
-          <NButton v-if="!isImageFile" size="small" type="primary" @click="showPreviewModal = false; openEditor(selectedFile!)">
+          <NButton v-if="!isImageFile && !isPdfFile" size="small" type="primary" @click="showPreviewModal = false; openEditor(selectedFile!)">
             <template #icon><NIcon :component="CreateOutline" /></template>
             {{ t('pages.files.actions.edit') }}
           </NButton>
@@ -1013,15 +1255,49 @@ onMounted(() => {
           />
         </div>
         
+        <PdfViewer
+          v-else-if="isPdfFile && pdfUrl"
+          :url="pdfUrl"
+          :auth-token="authStore.token || undefined"
+          :fullscreen="isPreviewMaximized"
+          @toggle-fullscreen="isPreviewMaximized = !isPreviewMaximized"
+        />
+        
         <template v-else-if="isMarkdownFile">
-          <NTabs v-model:value="previewTab" type="line">
-            <NTabPane name="preview" :tab="t('pages.files.preview')">
-              <div class="markdown-preview" v-html="renderMarkdown(fileContent)"></div>
-            </NTabPane>
-            <NTabPane name="source" :tab="t('pages.files.source')">
-              <pre class="code-preview">{{ fileContent }}</pre>
-            </NTabPane>
-          </NTabs>
+          <div class="markdown-container" :class="{ 'markdown-container--full': isPreviewMaximized }">
+            <div class="markdown-content" :class="{ 'markdown-content--full': !tocHeadings.length }">
+              <NTabs v-model:value="previewTab" type="line">
+                <NTabPane name="preview" :tab="t('pages.files.preview')">
+                  <div class="markdown-preview" :class="{ 'markdown-preview--full': isPreviewMaximized }" v-html="renderMarkdown(fileContent)"></div>
+                </NTabPane>
+                <NTabPane name="source" :tab="t('pages.files.source')">
+                  <pre class="code-preview">{{ fileContent }}</pre>
+                </NTabPane>
+              </NTabs>
+            </div>
+            <div v-if="tocHeadings.length > 0 && previewTab === 'preview'" class="markdown-toc" :class="isPreviewMaximized ? 'markdown-toc--preview-full' : 'markdown-toc--preview'">
+              <div class="toc-title">{{ t('pages.files.toc') }}</div>
+              <div class="toc-list">
+                <template v-for="(heading, index) in tocHeadings" :key="heading.id">
+                  <div
+                    v-if="isHeadingVisible(tocHeadings, index)"
+                    class="toc-item"
+                    :class="['toc-item--level-' + heading.level, { 'toc-item--has-children': hasVisibleChildren(tocHeadings, index, heading.level) }]"
+                  >
+                    <span class="toc-number">{{ getTocNumber(tocHeadings, index) }}</span>
+                    <span class="toc-text" @click="scrollToHeading(heading.id)">{{ heading.text }}</span>
+                    <span
+                      v-if="hasVisibleChildren(tocHeadings, index, heading.level)"
+                      class="toc-toggle"
+                      @click.stop="toggleTocExpand(heading)"
+                    >
+                      <NIcon size="14" :component="isTocExpanded(heading) ? ChevronDownOutline : ChevronForwardOutline" />
+                    </span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
         </template>
         
         <pre v-else-if="isCodeFile || fileContent" class="code-preview">{{ fileContent }}</pre>
@@ -1030,9 +1306,21 @@ onMounted(() => {
       </NSpin>
     </NModal>
 
-    <NModal v-model:show="showEditorModal" preset="card" style="width: 95%; max-width: 1400px; height: 90vh;" :title="selectedFile?.name || t('pages.files.editor.title')">
+    <NModal 
+      v-model:show="showEditorModal" 
+      preset="card" 
+      :style="isEditorMaximized ? 'width: 100vw; height: 100vh; max-width: 100vw; top: 0; left: 0; margin: 0;' : 'width: 95%; max-width: 1400px; height: 90vh;'" 
+      :content-style="isEditorMaximized ? 'height: calc(100vh - 80px); overflow: hidden;' : ''"
+      :title="selectedFile?.name || t('pages.files.editor.title')"
+      :closable="!isEditorMaximized"
+      :mask-closable="!isEditorMaximized"
+    >
       <template #header-extra>
         <NSpace :size="8">
+          <NButton size="small" quaternary @click="isEditorMaximized = !isEditorMaximized">
+            <template #icon><NIcon :component="isEditorMaximized ? ContractOutline : ExpandOutline" /></template>
+            {{ isEditorMaximized ? t('pages.files.actions.exitFullscreen') : t('pages.files.actions.fullscreen') }}
+          </NButton>
           <NButton size="small" type="primary" :loading="fileLoading" @click="saveFile">
             {{ t('pages.files.actions.save') }}
           </NButton>
@@ -1042,7 +1330,7 @@ onMounted(() => {
         </NSpace>
       </template>
       
-      <div class="editor-container">
+      <div class="editor-container" :class="{ 'editor-container--fullscreen': isEditorMaximized }">
         <div class="editor-toolbar">
           <div class="toolbar-group">
             <NTooltip trigger="hover">
@@ -1197,10 +1485,35 @@ onMounted(() => {
               v-model="editedContent"
               class="full-editor"
               :placeholder="t('pages.files.editPlaceholder')"
+              @paste="handleEditorPaste"
             />
           </div>
-          <div v-if="isMarkdownFile" class="preview-pane">
-            <div class="markdown-preview markdown-preview--full" v-html="renderMarkdown(editedContent)"></div>
+          <div v-if="isMarkdownFile" class="preview-pane-wrapper">
+            <div class="preview-pane">
+              <div class="markdown-preview markdown-preview--full" v-html="renderMarkdown(editedContent)"></div>
+            </div>
+            <div v-if="editorTocHeadings.length > 0" class="markdown-toc" :class="isEditorMaximized ? 'markdown-toc--editor-full' : 'markdown-toc--editor'">
+              <div class="toc-title">{{ t('pages.files.toc') }}</div>
+              <div class="toc-list">
+                <template v-for="(heading, index) in editorTocHeadings" :key="heading.id">
+                  <div
+                    v-if="isHeadingVisible(editorTocHeadings, index)"
+                    class="toc-item"
+                    :class="['toc-item--level-' + heading.level, { 'toc-item--has-children': hasVisibleChildren(editorTocHeadings, index, heading.level) }]"
+                  >
+                    <span class="toc-number">{{ getTocNumber(editorTocHeadings, index) }}</span>
+                    <span class="toc-text" @click="scrollToEditorHeading(heading.id)">{{ heading.text }}</span>
+                    <span
+                      v-if="hasVisibleChildren(editorTocHeadings, index, heading.level)"
+                      class="toc-toggle"
+                      @click.stop="toggleTocExpand(heading)"
+                    >
+                      <NIcon size="14" :component="isTocExpanded(heading) ? ChevronDownOutline : ChevronForwardOutline" />
+                    </span>
+                  </div>
+                </template>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1294,17 +1607,204 @@ onMounted(() => {
   overflow: auto;
 }
 
+.markdown-container {
+  display: flex;
+  gap: 16px;
+  min-height: 200px;
+  max-height: 70vh;
+}
+
+.markdown-container--full {
+  max-height: calc(100vh - 100px);
+  height: calc(100vh - 100px);
+}
+
+.markdown-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.markdown-content--full {
+  width: 100%;
+}
+
+.markdown-content .n-tabs {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.markdown-content :deep(.n-tabs-pane-wrapper) {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.markdown-content :deep(.n-tab-pane) {
+  height: 100%;
+  overflow: hidden;
+}
+
+.markdown-toc {
+  width: 220px;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  padding: 12px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.markdown-toc--preview {
+  margin-top: 40px;
+  max-height: calc(70vh - 40px);
+}
+
+.markdown-toc--preview-full {
+  margin-top: 40px;
+  height: calc(100% - 40px);
+  max-height: calc(100vh - 140px);
+}
+
+.markdown-toc--editor {
+  max-height: none;
+}
+
+.markdown-toc--editor-full {
+  max-height: none;
+}
+
+.toc-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.toc-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.toc-item {
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 1px 0;
+  position: relative;
+}
+
+.toc-item:hover {
+  background: rgba(var(--primary-color-rgb, 59, 130, 246), 0.08);
+  color: var(--text-primary);
+}
+
+.toc-item:hover .toc-number {
+  color: var(--link-color);
+}
+
+.toc-number {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+  min-width: 20px;
+  flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+
+.toc-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+.toc-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  cursor: pointer;
+  border-radius: 4px;
+  margin-left: auto;
+  color: var(--text-tertiary);
+  transition: all 0.15s ease;
+  opacity: 0.5;
+}
+
+.toc-item:hover .toc-toggle {
+  opacity: 1;
+}
+
+.toc-toggle:hover {
+  background: rgba(var(--primary-color-rgb, 59, 130, 246), 0.15);
+  color: var(--link-color);
+}
+
+.toc-item--level-1 { 
+  font-weight: 600;
+  margin-top: 4px;
+}
+.toc-item--level-1:first-child { 
+  margin-top: 0;
+}
+
+.toc-item--level-2 { 
+  padding-left: 20px;
+}
+
+.toc-item--level-3 { 
+  padding-left: 36px;
+  font-size: 12px;
+}
+
+.toc-item--level-4 { 
+  padding-left: 52px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.toc-item--level-5 { 
+  padding-left: 68px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.toc-item--level-6 { 
+  padding-left: 84px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
 .markdown-preview {
   padding: 16px;
   background: var(--bg-secondary);
   border-radius: var(--radius);
-  max-height: 500px;
   overflow: auto;
+  max-height: 70vh;
+  box-sizing: border-box;
 }
 
 .markdown-preview--full {
-  max-height: calc(90vh - 200px);
-  min-height: 300px;
+  max-height: calc(100vh - 150px);
+  height: 100%;
 }
 
 .markdown-preview :deep(h1),
@@ -1316,11 +1816,30 @@ onMounted(() => {
   margin: 16px 0 8px 0;
   font-weight: 600;
   color: var(--text-primary);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
 }
 
-.markdown-preview :deep(h1) { font-size: 1.5em; }
-.markdown-preview :deep(h2) { font-size: 1.3em; }
-.markdown-preview :deep(h3) { font-size: 1.15em; }
+.markdown-preview :deep(h1::before),
+.markdown-preview :deep(h2::before),
+.markdown-preview :deep(h3::before),
+.markdown-preview :deep(h4::before),
+.markdown-preview :deep(h5::before),
+.markdown-preview :deep(h6::before) {
+  content: attr(data-heading-number);
+  color: var(--text-tertiary);
+  font-weight: 500;
+  font-size: 0.85em;
+  flex-shrink: 0;
+}
+
+.markdown-preview :deep(h1) { font-size: 1.75em; }
+.markdown-preview :deep(h2) { font-size: 1.5em; }
+.markdown-preview :deep(h3) { font-size: 1.25em; }
+.markdown-preview :deep(h4) { font-size: 1.1em; }
+.markdown-preview :deep(h5) { font-size: 1em; }
+.markdown-preview :deep(h6) { font-size: 0.95em; }
 
 .markdown-preview :deep(p) {
   margin: 8px 0;
@@ -1347,15 +1866,127 @@ onMounted(() => {
 
 .markdown-preview :deep(pre) {
   margin: 12px 0;
+  background: var(--bg-primary);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.markdown-preview :deep(pre code) {
+  padding: 0;
+  background: transparent;
+}
+
+.markdown-preview :deep(.code-block-container) {
+  display: flex;
+  position: relative;
+  margin: 12px 0;
+  background: var(--bg-primary);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.markdown-preview :deep(.code-line-numbers) {
+  display: flex;
+  flex-direction: column;
+  padding: 12px 8px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  text-align: right;
+  user-select: none;
+  min-width: 40px;
+}
+
+.markdown-preview :deep(.line-number) {
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  padding: 0 4px;
+}
+
+.markdown-preview :deep(.code-content) {
+  flex: 1;
+  padding: 12px;
+  overflow-x: auto;
+  min-width: 0;
+}
+
+.markdown-preview :deep(.code-content code) {
+  padding: 0;
+  background: transparent;
+  display: block;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.markdown-preview :deep(.code-block-wrapper) {
+  position: relative;
+  margin: 12px 0;
   padding: 12px;
   background: var(--bg-primary);
   border-radius: var(--radius);
   overflow-x: auto;
 }
 
-.markdown-preview :deep(pre code) {
+.markdown-preview :deep(.code-block-wrapper code) {
   padding: 0;
   background: transparent;
+  display: block;
+}
+
+.markdown-preview :deep(.code-copy-btn) {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  z-index: 10;
+}
+
+.markdown-preview :deep(.code-block-container:hover .code-copy-btn) {
+  opacity: 1;
+}
+
+.markdown-preview :deep(.code-copy-btn:hover) {
+  background: var(--bg-primary);
+  color: var(--link-color);
+}
+.markdown-preview :deep(.code-copy-btn.copied) {
+  color: var(--success-color);
+}
+
+.markdown-preview :deep(.katex-display) {
+  display: block;
+  margin: 16px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+  padding: 8px 0;
+}
+
+.markdown-preview :deep(.katex-display > .katex) {
+  display: inline-block;
+  text-align: center;
+  white-space: normal;
+}
+
+.markdown-preview :deep(.katex) {
+  font-size: 1.1em;
+}
+
+.markdown-preview :deep(.katex-inline) {
+  padding: 0 2px;
 }
 
 .markdown-preview :deep(blockquote) {
@@ -1392,10 +2023,117 @@ onMounted(() => {
   font-weight: 600;
 }
 
+.markdown-preview :deep(img) {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+  margin: 8px 0;
+}
+
+.markdown-preview :deep(hr) {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 16px 0;
+}
+
+.markdown-preview :deep(del) {
+  color: var(--text-tertiary);
+  text-decoration: line-through;
+}
+
+.markdown-preview :deep(mark) {
+  background: rgba(255, 200, 0, 0.3);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+.markdown-preview :deep(strong) {
+  font-weight: 600;
+}
+
+.markdown-preview :deep(em) {
+  font-style: italic;
+}
+
+.markdown-preview :deep(sup) {
+  font-size: 0.75em;
+  vertical-align: super;
+  line-height: 0;
+}
+
+.markdown-preview :deep(sub) {
+  font-size: 0.75em;
+  vertical-align: sub;
+  line-height: 0;
+}
+
+.markdown-preview :deep(details) {
+  margin: 8px 0;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border-radius: var(--radius);
+  border: 1px solid var(--border-color);
+}
+
+.markdown-preview :deep(summary) {
+  cursor: pointer;
+  font-weight: 500;
+  outline: none;
+}
+
+.markdown-preview :deep(summary:hover) {
+  color: var(--link-color);
+}
+
+.markdown-preview :deep(dl) {
+  margin: 12px 0;
+}
+
+.markdown-preview :deep(dt) {
+  font-weight: 600;
+  margin-top: 8px;
+}
+
+.markdown-preview :deep(dd) {
+  margin-left: 24px;
+  color: var(--text-secondary);
+}
+
+.markdown-preview :deep(figure) {
+  margin: 12px 0;
+  text-align: center;
+}
+
+.markdown-preview :deep(figcaption) {
+  font-size: 0.9em;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+
+.markdown-preview :deep(abbr[title]) {
+  text-decoration: underline dotted;
+  cursor: help;
+}
+
+.markdown-preview :deep(kbd) {
+  display: inline-block;
+  padding: 2px 6px;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  font-size: 0.85em;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  box-shadow: inset 0 -1px 0 var(--border-color);
+}
+
 .editor-container {
   height: calc(90vh - 120px);
   display: flex;
   flex-direction: column;
+}
+
+.editor-container--fullscreen {
+  height: calc(100vh - 100px);
 }
 
 .editor-toolbar {
@@ -1424,6 +2162,7 @@ onMounted(() => {
   display: flex;
   gap: 12px;
   min-height: 0;
+  overflow: hidden;
 }
 
 .editor-pane {
@@ -1431,6 +2170,20 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.preview-pane-wrapper {
+  flex: 1;
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+  border-left: 1px solid var(--border-color);
+  padding-left: 12px;
+  min-height: 0;
+  overflow: hidden;
+  align-items: stretch;
 }
 
 .preview-pane {
@@ -1438,14 +2191,25 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  border-left: 1px solid var(--border-color);
-  padding-left: 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.preview-pane .markdown-preview {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.preview-pane-wrapper .markdown-toc {
+  flex-shrink: 0;
+  align-self: stretch;
 }
 
 .full-editor {
   width: 100%;
   flex: 1;
-  min-height: 300px;
+  min-height: 0;
   padding: 16px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
@@ -1455,6 +2219,8 @@ onMounted(() => {
   line-height: 1.6;
   resize: none;
   outline: none;
+  box-sizing: border-box;
+  color: var(--text-primary);
 }
 
 .full-editor:focus {
